@@ -1,12 +1,20 @@
-// Arnés de prueba: ejecuta el script de index.html con un DOM/canvas simulados
+// Arnés de prueba: ejecuta game.js con un DOM/canvas simulados
 const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
 
 const REPO = 'C:/Users/fgonz/OneDrive/Desktop/experimento/CiudadJS';
-const html = fs.readFileSync(path.join(REPO, 'index.html'), 'utf8');
-const m = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!m) throw new Error('no encontré el <script>');
+// El código vive en game.js y el estilo en style.css; index.html es sólo marcado
+const markup = fs.readFileSync(path.join(REPO, 'index.html'), 'utf8');
+let code;
+const jsPath = path.join(REPO, 'game.js');
+if (fs.existsSync(jsPath)) {
+  code = fs.readFileSync(jsPath, 'utf8');
+} else {                                    // por si vuelve a estar embebido en el html
+  const m = markup.match(/<script>([\s\S]*?)<\/script>/);
+  if (!m) throw new Error('no encontré game.js ni un <script> embebido en index.html');
+  code = m[1];
+}
 
 // Exporta el estado interno (let/const no son accesibles como propiedades globales)
 const EXPORTS = `
@@ -43,7 +51,7 @@ const EXPORTS = `
 };
 if (typeof globalThis.requestAnimationFrame === 'function') { /* nada */ }
 `;
-const code = m[1] + EXPORTS;
+code += EXPORTS;
 
 // ---- DOM simulado ----
 // El canvas simulado registra las operaciones de dibujo: sirve para comprobar
@@ -592,7 +600,15 @@ api.click('help');
 ok('la ayuda se abre y se cierra',
    ayudaDespues !== ayudaAntes && api.hidden('helpbox') === ayudaAntes,
    'cerrada=' + ayudaAntes + ' tras el clic=' + ayudaDespues);
-ok('en el navegador la ayuda arranca cerrada', /id="helpbox"[^>]*hidden/.test(html), 'class="panel hidden" en el marcado');
+ok('en el navegador la ayuda arranca cerrada', /id="helpbox"[^>]*hidden/.test(markup), 'class="panel hidden" en el marcado');
+ok('el html quedó sólo con el marcado y las referencias',
+   /<link rel="stylesheet" href="style\.css">/.test(markup)
+   && /<script src="game\.js"><\/script>/.test(markup)
+   && !/<style>/.test(markup) && !/<script>/.test(markup),
+   'link a style.css + script src="game.js", sin bloques embebidos');
+ok('style.css y game.js existen y no están vacíos',
+   fs.statSync(path.join(REPO, 'style.css')).size > 500 && fs.statSync(jsPath).size > 20000,
+   'css=' + fs.statSync(path.join(REPO, 'style.css')).size + ' b · js=' + fs.statSync(jsPath).size + ' b');
 
 api.setSpeed(0); api.updateHUD();
 const reloj = api.text('hd');
