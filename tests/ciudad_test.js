@@ -23,8 +23,8 @@ const EXPORTS = `
   get logs(){return logs}, get ordinances(){return ordinances}, get taxRate(){return taxRate},
   get TILES(){return TILES}, get zoom(){return zoom}, clamp,
   get VIEWS(){return VIEWS}, get cars(){return cars}, get carDensity(){return carDensity},
-  get traffic(){return traffic}, get LANE(){return LANE},
-  stepTraffic, carTarget, laneOffset, roadAt, roadTiles, drawCars, drawTile,
+  get traffic(){return traffic}, get LANE(){return LANE}, get HW(){return HW}, get HH(){return HH}, get WORLD(){return WORLD},
+  stepTraffic, carTarget, laneOffset, roadAt, roadTiles, drawCars, drawTile, drawGround, drawRoadAxis, tileCenter, gridPoint, worldDir,
   get ops(){return ctx.__ops}, clearOps(){ ctx.__ops.length = 0; },
   setTool(i){ tool=i; }, setView(v){ view=v; }, setSpeed(s){ speed=s; },
   tick, draw, updateHoverInfo, updateHUD, updateSidebar, renderTools, renderViews, renderSpeed,
@@ -443,70 +443,112 @@ for (let f = 0; f < 2000; f++) api.stepTraffic(40);
 const msTrafico = Date.now() - t0;
 ok('el tránsito es liviano', msTrafico < 3000, '2000 cuadros en ' + msTrafico + ' ms');
 
-// 10b. Geometría del dibujo: cada vehículo va en su carril, no sobre el eje de la calle
+// 10b. Geometría del dibujo isométrico: cada vehículo va en su carril, no sobre el eje de la calle
 api.init();
+for (let y = 0; y < NN; y++) for (let x = 0; x < NN; x++) api.g[y][x] = 0;
+for (let x = 4; x <= 8; x++) api.g[5][x] = 1;                  // una calle de punta a punta
+const HW = api.HW, HH = api.HH;
+const iso = (fx, fy) => [(fx - fy) * HW, (fx + fy - 1) * HH];  // proyección 2:1 (la misma del juego)
+const igual = (a, b) => !!a && !!b && Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
+const resta = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const cent = q => [q.reduce((s, p) => s + p[0], 0) / q.length, q.reduce((s, p) => s + p[1], 0) / q.length];
+// esquinas del vehículo en la grilla, proyectadas: largo L y ancho W, en celdas
+function coche(c) {
+  const dx = c.nx - c.x, dy = c.ny - c.y, [ox, oy] = api.laneOffset(dx, dy);
+  const fx = c.x + 0.5 + dx * c.p + ox, fy = c.y + 0.5 + dy * c.p + oy;
+  const L = c.camion ? 0.31 : 0.22, W = c.camion ? 0.15 : 0.13;
+  const p = (a, b) => iso(fx + dx * L * a - dy * W * b, fy + dy * L * a + dx * W * b);
+  return { carroceria: [p(-1, -1), p(1, -1), p(1, 1), p(-1, 1)],
+           parabrisas: [p(0.35, -0.85), p(0.95, -0.85), p(0.95, 0.85), p(0.35, 0.85)],
+           centro: iso(fx, fy), eje: iso(fx - ox, fy - oy) };   // eje: el mismo punto, sin el carril
+}
 api.cars.length = 0;
 api.cars.push({ x: 5, y: 5, nx: 6, ny: 5, p: 0.5, spd: 2, color: '#fff', camion: false, life: 100 });  // hacia el este
 api.cars.push({ x: 7, y: 5, nx: 6, ny: 5, p: 0.5, spd: 2, color: '#000', camion: false, life: 100 });  // hacia el oeste, misma calle
+const este = coche(api.cars[0]), oeste = coche(api.cars[1]);
 api.clearOps();
-api.drawCars();
+api.drawCars(api.cars);
+const pts = api.ops.filter(o => o[0] === 'moveTo' || o[0] === 'lineTo').map(o => o[1]);
 const tras = api.ops.filter(o => o[0] === 'translate').map(o => o[1]);
-const girs = api.ops.filter(o => o[0] === 'rotate').map(o => o[1][0]);
-const rects = api.ops.filter(o => o[0] === 'fillRect').length;
-const centroCalle = 5.5 * 30;
+const cuadro = i => pts.slice(i * 4, i * 4 + 4);                       // cada cuadro: 1 moveTo + 3 lineTo
+const mismo = (q, exp) => q.length === 4 && q.every((p, i) => igual(p, exp[i]));
+ok('cada vehículo se dibuja en su lugar del mapa (proyección isométrica)',
+  pts.length === 24 && tras.length === 2 && tras.every(t => t[0] === 2 && t[1] === 2) &&
+  mismo(cuadro(0), este.carroceria) && mismo(cuadro(1), este.carroceria) &&   // sombra + carrocería
+  mismo(cuadro(2), este.parabrisas) &&
+  mismo(cuadro(3), oeste.carroceria) && mismo(cuadro(4), oeste.carroceria) &&
+  mismo(cuadro(5), oeste.parabrisas),
+  'carrocería este=' + JSON.stringify(cuadro(1).map(p => p.map(v => Math.round(v * 10) / 10))));
 ok('cada sentido se dibuja en su carril (no sobre el eje)',
-  tras.length === 2 && Math.abs(tras[0][1] - (centroCalle + api.LANE)) < 0.01 && Math.abs(tras[1][1] - (centroCalle - api.LANE)) < 0.01 && tras[0][1] > tras[1][1] && rects >= 6,
-  'este y=' + (tras[0] ? tras[0][1].toFixed(1) : '?') + ' oeste y=' + (tras[1] ? tras[1][1].toFixed(1) : '?') + ' centro=' + centroCalle + ' carril=' + api.LANE.toFixed(1));
-ok('los vehículos se dibujan orientados hacia donde van',
-  girs.length === 2 && Math.abs(girs[0]) < 1e-9 && Math.abs(Math.abs(girs[1]) - Math.PI) < 1e-9,
-  'este=' + (girs[0] || 0).toFixed(2) + ' oeste=' + (girs[1] || 0).toFixed(2));
+  igual(resta(este.centro, este.eje), [-api.LANE * HW, api.LANE * HH]) &&
+  igual(resta(oeste.centro, oeste.eje), [api.LANE * HW, -api.LANE * HH]),
+  'este=' + resta(este.centro, este.eje).map(v => v.toFixed(1)).join(',') + ' oeste=' + resta(oeste.centro, oeste.eje).map(v => v.toFixed(1)).join(',') + ' carril=' + api.LANE + ' celdas');
+ok('los vehículos se dibujan orientados como la calle por la que van',
+  (() => {
+    const cruz = (a, b) => a[0] * b[1] - a[1] * b[0];
+    const largo = resta(este.carroceria[1], este.carroceria[0]);   // de la cola a la trompa
+    return Math.abs(cruz(largo, api.worldDir(1, 0))) < 1e-6 && largo[0] > 0 && largo[1] > 0;
+  })(),
+  'largo=' + resta(este.carroceria[1], este.carroceria[0]).map(v => v.toFixed(1)).join(',') + ' calle=' + api.worldDir(1, 0).join(','));
+ok('el parabrisas va adelante: el auto mira para donde va',
+  (() => {
+    const punta = (q, dir) => { const d = resta(cent(q.parabrisas), cent(q.carroceria)); return d[0] * dir[0] + d[1] * dir[1] > 0; };
+    return punta(este, api.worldDir(1, 0)) && punta(oeste, api.worldDir(-1, 0));
+  })(),
+  'este→' + api.worldDir(1, 0).join(',') + ' oeste→' + api.worldDir(-1, 0).join(','));
 ok('las ruedas no se salen del ancho de la calle',
-  tras.every(o => Math.abs(o[1] - centroCalle) + 6 <= 15), 'carril ' + api.LANE.toFixed(1) + ' + medio auto 6 <= medio tile 15');
-// 10c. La línea de eje de las calles: recta = tramo completo, extremo = hasta el centro (doble mano)
+  api.LANE + 0.13 <= 0.5 &&                                   // medio auto + carril ≤ medio tile
+  [...este.carroceria, ...este.parabrisas, ...oeste.carroceria, ...oeste.parabrisas].every(p => {
+    const fx = (p[0] / HW + p[1] / HH + 1) / 2, fy = (p[1] / HH + 1 - p[0] / HW) / 2;
+    const celda = api.g[Math.floor(fy)];                       // todas las esquinas caen sobre la calle
+    return celda && celda[Math.floor(fx)] === 1;
+  }),
+  'carril ' + api.LANE + ' celdas + medio auto 0.13 ≤ medio tile 0.5');
+
+// 10c. La línea de eje de las calles en isométrico: recta = tramo completo, extremo = sólo la mitad
 api.init();
 for (let y = 0; y < NN; y++) for (let x = 0; x < NN; x++) api.g[y][x] = 0;
-[4, 5, 6, 7].forEach(x => api.g[5][x] = 1);                 // recta horizontal en y=5, x=4..7
-api.g[9][8] = 1; api.g[9][9] = 1;                            // par suelto: extremo este en (8,9)
-api.g[7][12] = 1; api.g[8][12] = 1; api.g[9][12] = 1;        // columna en x=12, y=7..9
-api.g[15][15] = 1;                                           // calle aislada
-api.clearOps();
-api.drawTile(4, 5);   // X=120,Y=150: sólo sigue al este → del centro al borde derecho
-api.drawTile(6, 5);   // X=180,Y=150: recta → tramo completo
-api.drawTile(8, 9);   // X=240,Y=270: sólo sigue al este
-api.drawTile(12, 8);  // X=360,Y=240: columna completa (norte y sur)
-api.drawTile(15, 15); // X=450,Y=450: aislada, sólo el guioncito
-const mov = api.ops.filter(o => o[0] === 'moveTo').map(o => o[1]);
-const lin = api.ops.filter(o => o[0] === 'lineTo').map(o => o[1]);
-const igual = (a, b) => a && b && Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
-ok('la línea de eje se dibuja sólo donde la calle sigue',
-  mov.length === 5 && lin.length === 5 &&
-  igual(mov[0], [135, 165]) && igual(lin[0], [150, 165]) &&
-  igual(mov[1], [180, 165]) && igual(lin[1], [210, 165]) &&
-  igual(mov[2], [255, 285]) && igual(lin[2], [270, 285]) &&
-  igual(mov[3], [375, 240]) && igual(lin[3], [375, 270]) &&
-  Math.abs(mov[4][0] - 465) <= 6.5 && Math.abs(mov[4][1] - 465) <= 6.5,
-  'mov=' + JSON.stringify(mov) + ' lin=' + JSON.stringify(lin));
+[4, 5, 6, 7].forEach(x => api.g[5][x] = 1);                   // recta horizontal en y=5, x=4..7
+api.g[9][8] = 1; api.g[9][9] = 1;                             // par suelto: extremo este en (8,9)
+api.g[7][12] = 1; api.g[8][12] = 1; api.g[9][12] = 1;         // columna en x=12, y=7..9
+api.g[15][15] = 1;                                            // calle aislada
+const ejeDe = (x, y) => {
+  api.clearOps(); api.drawRoadAxis(x, y);
+  return { mov: api.ops.filter(o => o[0] === 'moveTo').map(o => o[1]),
+           lin: api.ops.filter(o => o[0] === 'lineTo').map(o => o[1]) };
+};
+const centro = ejeDe(6, 5), extremo = ejeDe(4, 5), parSuelto = ejeDe(8, 9), columna = ejeDe(12, 8), aislada = ejeDe(15, 15);
+ok('la línea de eje se dibuja sólo donde la calle sigue (isométrico)',
+  centro.mov.length === 1 && centro.lin.length === 1 &&
+  igual(centro.mov[0], [15, 157.5]) && igual(centro.lin[0], [45, 172.5]) &&          // (6,5): rombo en 30,165
+  igual(extremo.mov[0], [-30, 135]) && igual(extremo.lin[0], [-15, 142.5]) &&        // (4,5): sólo sigue al este
+  igual(parSuelto.mov[0], [-30, 255]) && igual(parSuelto.lin[0], [-15, 262.5]) &&    // (8,9): sólo sigue al este
+  igual(columna.mov[0], [135, 292.5]) && igual(columna.lin[0], [105, 307.5]) &&      // (12,8): norte ↔ sur
+  igual(aislada.mov[0], [-7.5, 450]) && igual(aislada.lin[0], [7.5, 450]),           // (15,15): guioncito
+  'centro=' + JSON.stringify(centro.mov) + '→' + JSON.stringify(centro.lin) + ' extremo=' + JSON.stringify(extremo.mov) + '→' + JSON.stringify(extremo.lin) + ' columna=' + JSON.stringify(columna.mov) + '→' + JSON.stringify(columna.lin));
 /* ================= Interfaz: lienzo a pantalla completa, íconos y orden ================= */
 console.log('\n-- interfaz --');
-const VW = 1600, VH = 900, LADO = NN * 30;   // el mundo mide 20 tiles de 30px
+const VW = 1600, VH = 900, WD = api.WORLD;   // el mundo isométrico: 2*NN*HW por 2*NN*HH píxeles
 
 api.viewport(VW, VH);
 let [cw, ch] = api.canvasSize;
 ok('el lienzo ocupa toda la ventana', cw === VW && ch === VH, cw + 'x' + ch);
 
-let [kxc, kyc] = api.cam, zc = api.zoom;
+// bordes del mapa en pantalla: [izq, der, arriba, abajo]
+const bordes = (z) => { const [kx, ky] = api.cam; return [WD.minX * z + kx, (WD.minX + WD.w) * z + kx, WD.minY * z + ky, (WD.minY + WD.h) * z + ky]; };
+let zc = api.zoom, b1 = bordes(zc);
 ok('el mapa cubre toda la ventana (sin franjas vacías)',
-   kxc <= 0.5 && kyc <= 0.5 && kxc + LADO * zc >= VW - 0.5 && kyc + LADO * zc >= VH - 0.5,
-   'mapa=' + [kxc, kyc, kxc + LADO * zc, kyc + LADO * zc].map(v => Math.round(v)).join(',') + ' en ' + VW + 'x' + VH);
+   b1[0] <= 0.5 && b1[2] <= 0.5 && b1[1] >= VW - 0.5 && b1[3] >= VH - 0.5,
+   'mapa=' + b1.map(v => Math.round(v)).join(',') + ' en ' + VW + 'x' + VH);
 ok('la cámara no deja huecos al desplazarse al extremo',
-   (() => { api.pan ? 0 : 0; return kxc <= 0.5 && kyc <= 0.5; })(),
-   'zoom ' + zc.toFixed(2) + ' → mapa de ' + Math.round(LADO * zc) + 'px');
+   b1[0] <= 0.5 && b1[2] <= 0.5,
+   'zoom ' + zc.toFixed(2) + ' → mapa de ' + Math.round(WD.w * zc) + 'x' + Math.round(WD.h * zc) + 'px');
 
 api.viewport(900, 1400);
-let [kx2, ky2] = api.cam, z2 = api.zoom;
+let b2 = bordes(api.zoom);
 ok('al cambiar el tamaño de la ventana el mapa se reencuadra y sigue cubriendo',
-   kx2 <= 0.5 && ky2 <= 0.5 && kx2 + LADO * z2 >= 900 - 0.5 && ky2 + LADO * z2 >= 1400 - 0.5,
-   'origen=' + Math.round(kx2) + ',' + Math.round(ky2) + ' zoom=' + z2.toFixed(2));
+   b2[0] <= 0.5 && b2[2] <= 0.5 && b2[1] >= 900 - 0.5 && b2[3] >= 1400 - 0.5,
+   'bordes=' + b2.map(v => Math.round(v)).join(',') + ' zoom=' + api.zoom.toFixed(2));
 api.viewport(VW, VH);
 
 const botones = api.btn('tools');
