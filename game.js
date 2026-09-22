@@ -76,7 +76,7 @@ const MAX_STAGE=6;
 /* ============================== Estado ============================== */
 const DIRS4=[[1,0],[-1,0],[0,1],[0,-1]];
 const cv=document.getElementById('c');
-const ctx=cv.getContext('2d');
+let VW=960,VH=600;           // el lienzo en píxeles CSS: lo maneja render.js (PixiJS)
 const ZMIN=0.4, ZMAX=3;      // zoom: en el mínimo entra el mapa entero
 
 let g=[],res=[],burn=[],landValue=[],pollutionGrid=[],growthTarget=[],growthAccess=[],
@@ -635,49 +635,50 @@ const shade=(hex,f)=>{
 };
 const hash2=(x,y)=>{let h=Math.imul(x*374761393+y*668265263+1013904223,2246822519);h^=h>>>13;h=Math.imul(h,3266489917);return ((h^(h>>>16))>>>0)/4294967296;};
 
-const diamondPath=(cx,cy,hw,hh)=>{ctx.beginPath();ctx.moveTo(cx,cy-hh);ctx.lineTo(cx+hw,cy);ctx.lineTo(cx,cy+hh);ctx.lineTo(cx-hw,cy);ctx.closePath();};
-const fillDiamond=(cx,cy,hw,hh,col)=>{ctx.fillStyle=col;diamondPath(cx,cy,hw,hh);ctx.fill();};
+/* El dibujo lo hace render.js con PixiJS: acá sólo se arman las formas.
+   Cada forma es un objeto plano: {t:tipo, ...} y render.js la pinta en un Graphics.
+   poly=relleno, edge=contorno cerrado, line=polilínea, dash=tramo a rayas, rect/circle/ellipse. */
+const POLY=(p,f)=>({t:'poly',p:p,f:f});
+const EDGE=(p,s,w)=>({t:'edge',p:p,s:s,w:w||1});
+const LINE=(p,s,w)=>({t:'line',p:p,s:s,w:w||1});
+const DASH=(a,b,s,w,on,gap)=>({t:'dash',a:a,b:b,s:s,w:w||1,on:on||5,gap:gap||6});
+const RECT=(x,y,w,h,f)=>({t:'rect',x:x,y:y,w:w,h:h,f:f});
+const CIRC=(x,y,r,f)=>({t:'circle',x:x,y:y,r:r,f:f});
+const ELL=(x,y,rx,ry,f)=>({t:'ellipse',x:x,y:y,rx:rx,ry:ry,f:f});
+const rombo=(cx,cy,hw,hh)=>[[cx,cy-hh],[cx+hw,cy],[cx,cy+hh],[cx-hw,cy]];   // celda (x,y) en isométrico
 
 // Caja isométrica: base en el rombo de la celda, altura h hacia arriba (las dos caras
 // que miran al jugador y el techo; la cara sudoeste queda algo más iluminada que la sudeste).
-function drawPrism(cx,cy,hw,hh,h,col){
+function prismShapes(out,cx,cy,hw,hh,h,col){
   if(h>0.6){
-    ctx.fillStyle=shade(col,-0.08);
-    ctx.beginPath();ctx.moveTo(cx-hw,cy);ctx.lineTo(cx,cy+hh);ctx.lineTo(cx,cy+hh-h);ctx.lineTo(cx-hw,cy-h);ctx.closePath();ctx.fill();
-    ctx.fillStyle=shade(col,-0.34);
-    ctx.beginPath();ctx.moveTo(cx,cy+hh);ctx.lineTo(cx+hw,cy);ctx.lineTo(cx+hw,cy-h);ctx.lineTo(cx,cy+hh-h);ctx.closePath();ctx.fill();
-    ctx.fillStyle=shade(col,0.24);
-    diamondPath(cx,cy-h,hw,hh);ctx.fill();
+    out.push(POLY([[cx-hw,cy],[cx,cy+hh],[cx,cy+hh-h],[cx-hw,cy-h]],shade(col,-0.08)));
+    out.push(POLY([[cx,cy+hh],[cx+hw,cy],[cx+hw,cy-h],[cx,cy+hh-h]],shade(col,-0.34)));
+    out.push(POLY(rombo(cx,cy-h,hw,hh),shade(col,0.24)));
   }
   // línea de contacto: marca dónde apoya la construcción sin derramarse sobre los vecinos
-  ctx.strokeStyle='rgba(0,0,0,0.26)';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(cx-hw,cy);ctx.lineTo(cx,cy+hh);ctx.lineTo(cx+hw,cy);ctx.stroke();
+  out.push(LINE([[cx-hw,cy],[cx,cy+hh],[cx+hw,cy]],'rgba(0,0,0,0.26)',1));
 }
 // Pisos: líneas horizontales sobre las dos caras visibles
-function drawFloors(cx,cy,hw,hh,h,rows){
+function floorShapes(out,cx,cy,hw,hh,h,rows){
   if(h<5||rows<2)return;
-  ctx.strokeStyle='rgba(0,0,0,0.2)';ctx.lineWidth=1;
-  ctx.beginPath();
   for(let i=1;i<rows;i++){
     const y=h*i/rows;
-    ctx.moveTo(cx-hw,cy-y);ctx.lineTo(cx,cy+hh-y);
-    ctx.moveTo(cx,cy+hh-y);ctx.lineTo(cx+hw,cy-y);
+    out.push(LINE([[cx-hw,cy-y],[cx,cy+hh-y]],'rgba(0,0,0,0.2)',1));
+    out.push(LINE([[cx,cy+hh-y],[cx+hw,cy-y]],'rgba(0,0,0,0.2)',1));
   }
-  ctx.stroke();
 }
 // Ventanas: tres por fila en cada cara visible. De noche se encienden (algunas apagadas)
-function drawWindows(cx,cy,hw,hh,h,rows,lit){
+function windowShapes(out,cx,cy,hw,hh,h,rows,lit){
   if(h<6)return;
   const seed=hash2(Math.round(cx),Math.round(cy));
-  const w=Math.max(1.6,hw*0.15);
+  const w=Math.max(1.6,hw*0.15), col=lit?'rgba(255,233,150,0.9)':'rgba(18,22,28,0.4)';
   for(let r=0;r<rows;r++){
     const yb=h*(r+0.78)/rows, yt=h*(r+0.46)/rows;
     for(let i=0;i<3;i++){
       const t=0.22+i*0.28;
       if(lit&&((r*3+i+Math.floor(seed*5))%3===0))continue;
-      ctx.fillStyle=lit?'rgba(255,233,150,0.9)':'rgba(18,22,28,0.4)';
-      ctx.fillRect(cx-hw+hw*t-w/2,cy+hh*t-yb,w,yb-yt);   // cara sudoeste
-      ctx.fillRect(cx+hw*t-w/2,cy+hh-hh*t-yb,w,yb-yt);   // cara sudeste
+      out.push(RECT(cx-hw+hw*t-w/2,cy+hh*t-yb,w,yb-yt,col));   // cara sudoeste
+      out.push(RECT(cx+hw*t-w/2,cy+hh-hh*t-yb,w,yb-yt,col));   // cara sudeste
     }
   }
 }
@@ -693,36 +694,31 @@ const ZCOLOR={[RES_LOW]:'#c9a06a',[RES_MED]:'#b8854a',[RES_HIGH]:'#9c6a3c',
 const zoneHeight=(x,y,id,stage)=>BASEH[id]*(0.45+0.55*stage)*(0.9+0.2*hash2(x,y));
 
 // Suelo: pasto, asfalto o lote zonificado (queda a la vista si la construcción es baja)
-function drawGround(x,y){
+function groundShapes(out,x,y){
   const [cx,cy]=tileCenter(x,y),id=g[y][x];
   if(id===ROAD){
-    fillDiamond(cx,cy,HW,HH,'#575757');
-    drawRoadAxis(x,y);
+    out.push(POLY(rombo(cx,cy,HW,HH),'#575757'));
+    roadAxisShapes(out,x,y);
     return;
   }
   if(isZone(id)){
-    fillDiamond(cx,cy,HW,HH,res[y][x]>0?'#3f3520':'#4b4131');
-    ctx.strokeStyle=isRes(id)?'rgba(120,200,130,0.4)':(isCom(id)?'rgba(120,180,240,0.4)':'rgba(232,200,110,0.35)');
-    ctx.lineWidth=1;diamondPath(cx,cy,HW,HH);ctx.stroke();
+    out.push(POLY(rombo(cx,cy,HW,HH),res[y][x]>0?'#3f3520':'#4b4131'));
+    out.push(EDGE(rombo(cx,cy,HW,HH),isRes(id)?'rgba(120,200,130,0.4)':(isCom(id)?'rgba(120,180,240,0.4)':'rgba(232,200,110,0.35)'),1));
     return;
   }
-  if(id===PARK){fillDiamond(cx,cy,HW,HH,'#3d6b3d');return;}
-  fillDiamond(cx,cy,HW,HH,(x+y)%2?'#2f4a2f':'#2c452c');
+  if(id===PARK){out.push(POLY(rombo(cx,cy,HW,HH),'#3d6b3d'));return;}
+  out.push(POLY(rombo(cx,cy,HW,HH),(x+y)%2?'#2f4a2f':'#2c452c'));
 }
 
 // Doble mano: la línea de eje va del centro al borde por donde la calle sigue,
 // así una recta se lee como dos carriles y un cruce como intersección.
-function drawRoadAxis(x,y){
+function roadAxisShapes(out,x,y){
   const [cx,cy]=tileCenter(x,y);
   const e=roadAt(x+1,y),w=roadAt(x-1,y),no=roadAt(x,y-1),so=roadAt(x,y+1);
   const mitad=(dx,dy)=>{const [vx,vy]=worldDir(dx,dy);return [cx+vx/2,cy+vy/2];};
-  ctx.strokeStyle='#c9c9c9';ctx.lineWidth=1.3;ctx.setLineDash([5,6]);
-  ctx.beginPath();
-  if(e||w){const a=w?mitad(-1,0):[cx,cy],b=e?mitad(1,0):[cx,cy];ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);}
-  if(no||so){const a=no?mitad(0,-1):[cx,cy],b=so?mitad(0,1):[cx,cy];ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);}
-  if(!e&&!w&&!no&&!so){ctx.setLineDash([]);ctx.strokeStyle='#bdbdbd';ctx.beginPath();ctx.moveTo(cx-HW*0.25,cy);ctx.lineTo(cx+HW*0.25,cy);}
-  ctx.stroke();
-  ctx.setLineDash([]);
+  if(e||w)out.push(DASH(w?mitad(-1,0):[cx,cy],e?mitad(1,0):[cx,cy],'#c9c9c9',1.3,5,6));
+  if(no||so)out.push(DASH(no?mitad(0,-1):[cx,cy],so?mitad(0,1):[cx,cy],'#c9c9c9',1.3,5,6));
+  if(!e&&!w&&!no&&!so)out.push(LINE([[cx-HW*0.25,cy],[cx+HW*0.25,cy]],'#bdbdbd',1.3));
 }
 
 // Color de la vista de datos de cada celda (null = no se pinta)
@@ -761,121 +757,126 @@ function overlayFor(x,y){
   return null;
 }
 
-// Construcciones: se dibujan en el orden del mapa para que se tapen bien entre ellas
-function drawTile(x,y){
+// Vistas de datos: el rombo de la celda pintado con el color del mapa temático
+function overlayShapes(out,x,y){
+  const c=overlayFor(x,y);
+  if(!c)return;
+  const [cx,cy]=tileCenter(x,y);
+  out.push(POLY(rombo(cx,cy,HW,HH),c));
+}
+
+// Construcciones: el orden de las capas lo resuelve render.js (fila por fila, atrás→adelante)
+function tileShapes(out,x,y){
   const [cx,cy]=tileCenter(x,y),id=g[y][x];
   const stage=isZone(id)?res[y][x]/MAX_STAGE:0;
 
   if(isZone(id)&&stage>0){
     const h=zoneHeight(x,y,id,stage),col=ZCOLOR[id];
-    ctx.fillStyle='rgba(0,0,0,0.25)';diamondPath(cx,cy,HW,HH);ctx.fill();
-    drawPrism(cx,cy,HW,HH,h,col);
-    drawFloors(cx,cy,HW,HH,h,Math.max(2,Math.round(h/7)));
-    drawWindows(cx,cy,HW,HH,h,Math.max(1,Math.round(h/9)),false);
+    out.push(POLY(rombo(cx,cy,HW,HH),'rgba(0,0,0,0.25)'));
+    prismShapes(out,cx,cy,HW,HH,h,col);
+    floorShapes(out,cx,cy,HW,HH,h,Math.max(2,Math.round(h/7)));
+    windowShapes(out,cx,cy,HW,HH,h,Math.max(1,Math.round(h/9)),false);
     if(isCom(id)&&stage>0.75){                       // cartel luminoso en la azotea
-      ctx.fillStyle='rgba(255,236,170,0.85)';ctx.fillRect(cx-7,cy-h-4,14,3);
-      ctx.fillStyle=shade(col,0.4);ctx.fillRect(cx-9,cy-h-1,18,2);
+      out.push(RECT(cx-7,cy-h-4,14,3,'rgba(255,236,170,0.85)'));
+      out.push(RECT(cx-9,cy-h-1,18,2,shade(col,0.4)));
     }
-    if(isInd(id)&&stage>0.3){                        // chimenea humeante
-      const ch=5+stage*9,t=Date.now()*0.001;
-      drawPrism(cx+6,cy-h+2,HW*0.13,HH*0.22,ch,'#5a5a62');
-      ctx.fillStyle='rgba(205,205,205,0.5)';
-      for(let i=0;i<3;i++){
-        const p=((t*0.3+i/3)%1);
-        ctx.beginPath();ctx.arc(cx+6+Math.sin(p*6)*3,cy-h-ch-3-p*20,3+p*4,0,7);ctx.fill();
-      }
+    if(isInd(id)&&stage>0.3){                        // chimenea (el humo va en fxShapes)
+      const ch=5+stage*9;
+      prismShapes(out,cx+6,cy-h+2,HW*0.13,HH*0.22,ch,'#5a5a62');
     }
   }else if(id===PARK){
     const arboles=[[-13,4,6],[9,-5,7],[2,11,5],[-4,-9,4]];
     for(const [dx,dy,r] of arboles){
       const tx=cx+dx,ty=cy+dy;
-      ctx.fillStyle='rgba(0,0,0,0.22)';ctx.beginPath();ctx.ellipse(tx+3,ty+r*0.5,r*0.9,r*0.45,0,0,7);ctx.fill();
-      ctx.fillStyle='#5a3d22';ctx.fillRect(tx-1,ty-r*0.3,2,r*0.7);
-      ctx.fillStyle='#3f8a3f';ctx.beginPath();ctx.arc(tx,ty-r*0.7,r,0,7);ctx.fill();
-      ctx.fillStyle='#57a557';ctx.beginPath();ctx.arc(tx-r*0.25,ty-r*0.95,r*0.6,0,7);ctx.fill();
+      out.push(ELL(tx+3,ty+r*0.5,r*0.9,r*0.45,'rgba(0,0,0,0.22)'));
+      out.push(RECT(tx-1,ty-r*0.3,2,r*0.7,'#5a3d22'));
+      out.push(CIRC(tx,ty-r*0.7,r,'#3f8a3f'));
+      out.push(CIRC(tx-r*0.25,ty-r*0.95,r*0.6,'#57a557'));
     }
   }else if(id===POWER){
     const h=BASEH[POWER];
-    ctx.fillStyle='rgba(0,0,0,0.25)';diamondPath(cx,cy,HW,HH);ctx.fill();
-    drawPrism(cx,cy,HW,HH,h,'#e0c04a');
-    drawFloors(cx,cy,HW,HH,h,3);
-    ctx.strokeStyle='#4a4020';ctx.lineWidth=2.2;ctx.beginPath();      // rayo en la azotea
-    ctx.moveTo(cx+4,cy-h-8);ctx.lineTo(cx-2,cy-h-1);ctx.lineTo(cx+3,cy-h-1);ctx.lineTo(cx-4,cy-h+7);
-    ctx.stroke();
+    out.push(POLY(rombo(cx,cy,HW,HH),'rgba(0,0,0,0.25)'));
+    prismShapes(out,cx,cy,HW,HH,h,'#e0c04a');
+    floorShapes(out,cx,cy,HW,HH,h,3);
+    out.push(LINE([[cx+4,cy-h-8],[cx-2,cy-h-1],[cx+3,cy-h-1],[cx-4,cy-h+7]],'#4a4020',2.2));  // rayo en la azotea
   }else if(id===WATER){
     const h=BASEH[WATER];
-    ctx.fillStyle='rgba(0,0,0,0.25)';diamondPath(cx,cy,HW,HH);ctx.fill();
-    drawPrism(cx,cy,HW,HH,h,'#4a90e2');
-    drawPrism(cx,cy-h+2,HW*0.5,HH*0.5,8,'#7fc0ff');                   // tanque
-    const w=Date.now()*0.001;
-    ctx.strokeStyle='#2a5a8a';ctx.lineWidth=1.6;ctx.beginPath();
-    for(let i=0;i<=6;i++){
-      const nx=cx-HW*0.45+HW*0.9*i/6, ny=cy-h-6+Math.sin(w*1.6+i*0.7)*2;
-      if(i===0)ctx.moveTo(nx,ny);else ctx.lineTo(nx,ny);
-    }
-    ctx.stroke();
+    out.push(POLY(rombo(cx,cy,HW,HH),'rgba(0,0,0,0.25)'));
+    prismShapes(out,cx,cy,HW,HH,h,'#4a90e2');
+    prismShapes(out,cx,cy-h+2,HW*0.5,HH*0.5,8,'#7fc0ff');                                    // tanque
   }else if(id===FIRE_STATION||id===POLICE_STATION||id===SCHOOL||id===HOSPITAL){
     const h=BASEH[id];
     const col=id===FIRE_STATION?'#c8342f':(id===POLICE_STATION?'#2f6fc8':(id===SCHOOL?'#b07a4a':'#a6a3a0'));
-    ctx.fillStyle='rgba(0,0,0,0.25)';diamondPath(cx,cy,HW,HH);ctx.fill();
-    drawPrism(cx,cy,HW,HH,h,col);
-    drawFloors(cx,cy,HW,HH,h,Math.max(2,Math.round(h/7)));
+    out.push(POLY(rombo(cx,cy,HW,HH),'rgba(0,0,0,0.25)'));
+    prismShapes(out,cx,cy,HW,HH,h,col);
+    floorShapes(out,cx,cy,HW,HH,h,Math.max(2,Math.round(h/7)));
     if(id===FIRE_STATION){                                            // portón y banda blanca
-      ctx.fillStyle='rgba(255,255,255,0.9)';ctx.fillRect(cx-6,cy-h-2,12,3);
-      fillDiamond(cx,cy-h*0.32,HW*0.9,HH*0.9,'rgba(255,255,255,0.22)');
+      out.push(RECT(cx-6,cy-h-2,12,3,'rgba(255,255,255,0.9)'));
+      out.push(POLY(rombo(cx,cy-h*0.32,HW*0.9,HH*0.9),'rgba(255,255,255,0.22)'));
     }else if(id===POLICE_STATION){
-      fillDiamond(cx,cy-h*0.34,HW*0.9,HH*0.9,'rgba(255,255,255,0.22)');
-      ctx.fillStyle='#ffe36b';ctx.fillRect(cx-2,cy-h-4,4,4);
+      out.push(POLY(rombo(cx,cy-h*0.34,HW*0.9,HH*0.9),'rgba(255,255,255,0.22)'));
+      out.push(RECT(cx-2,cy-h-4,4,4,'#ffe36b'));
     }else if(id===SCHOOL){
-      ctx.fillStyle='rgba(255,255,255,0.75)';ctx.fillRect(cx-8,cy-h-3,16,3);
-      ctx.fillStyle='#d8d8d8';ctx.fillRect(cx+4,cy-h-1,HW*0.3,2);
+      out.push(RECT(cx-8,cy-h-3,16,3,'rgba(255,255,255,0.75)'));
+      out.push(RECT(cx+4,cy-h-1,HW*0.3,2,'#d8d8d8'));
     }else{
-      ctx.fillStyle='#fff';ctx.fillRect(cx-2,cy-h-8,4,14);            // cruz en la azotea
-      ctx.fillRect(cx-7,cy-h-3,14,4);
+      out.push(RECT(cx-2,cy-h-8,4,14,'#fff'));                        // cruz en la azotea
+      out.push(RECT(cx-7,cy-h-3,14,4,'#fff'));
     }
   }else if(id===RUBBLE){
-    fillDiamond(cx,cy,HW,HH,'#3a3a3a');
+    out.push(POLY(rombo(cx,cy,HW,HH),'#3a3a3a'));
     for(const [dx,dy,h] of [[-8,3,5],[7,-2,7],[2,8,3]]){
-      drawPrism(cx+dx,cy+dy,HW*0.3,HH*0.35,h,hash2(x+dx,y+dy)>0.5?'#6d6d6d':'#5a5a5a');
+      prismShapes(out,cx+dx,cy+dy,HW*0.3,HH*0.35,h,hash2(x+dx,y+dy)>0.5?'#6d6d6d':'#5a5a5a');
     }
-  }
-
-  if(burn[y][x]>0){
-    const sw=0.5+0.15*Math.sin(Date.now()/60+y*13+x*7);
-    const by=cy-(isZone(id)&&stage>0?zoneHeight(x,y,id,stage):6);
-    ctx.fillStyle='rgba(255,120,40,0.28)';ctx.beginPath();ctx.arc(cx,by-4,16,0,7);ctx.fill();
-    ctx.fillStyle='#ff5a1f';
-    ctx.beginPath();ctx.moveTo(cx,by-24);ctx.lineTo(cx+9*sw,by+2);ctx.lineTo(cx-9*sw,by+2);ctx.closePath();ctx.fill();
-    ctx.fillStyle='rgba(255,200,80,0.9)';ctx.beginPath();ctx.arc(cx,by-1,5,0,7);ctx.fill();
   }
 
   if(isZone(id)&&res[y][x]>0){                     // barra de desarrollo, sobre el borde del lote
     const w=HW*0.62,bx=cx-w/2,by=cy+HH-3;
-    ctx.fillStyle='rgba(0,0,0,0.45)';ctx.fillRect(bx,by,w,3);
-    ctx.fillStyle=stage>0.66?'rgba(120,230,140,0.9)':(stage>0.33?'rgba(232,199,76,0.9)':'rgba(255,150,90,0.9)');
-    ctx.fillRect(bx,by,w*stage,3);
+    out.push(RECT(bx,by,w,3,'rgba(0,0,0,0.45)'));
+    out.push(RECT(bx,by,w*stage,3,stage>0.66?'rgba(120,230,140,0.9)':(stage>0.33?'rgba(232,199,76,0.9)':'rgba(255,150,90,0.9)')));
+  }
+}
+
+// Lo que se mueve solo (humo, ola del tanque, fuego): render.js lo rearma cada cuadro
+function fxShapes(out,x,y){
+  const [cx,cy]=tileCenter(x,y),id=g[y][x];
+  const stage=isZone(id)?res[y][x]/MAX_STAGE:0;
+
+  if(isInd(id)&&stage>0.3){                                  // humo de la chimenea
+    const h=zoneHeight(x,y,id,stage),ch=5+stage*9,t=Date.now()*0.001;
+    for(let i=0;i<3;i++){
+      const p=((t*0.3+i/3)%1);
+      out.push(CIRC(cx+6+Math.sin(p*6)*3,cy-h-ch-3-p*20,3+p*4,'rgba(205,205,205,0.5)'));
+    }
+  }
+  if(id===WATER){                                            // ola sobre el tanque
+    const h=BASEH[WATER],w=Date.now()*0.001,p=[];
+    for(let i=0;i<=6;i++)p.push([cx-HW*0.45+HW*0.9*i/6,cy-h-6+Math.sin(w*1.6+i*0.7)*2]);
+    out.push(LINE(p,'#2a5a8a',1.6));
+  }
+  if(burn[y][x]>0){                                          // incendio
+    const sw=0.5+0.15*Math.sin(Date.now()/60+y*13+x*7);
+    const by=cy-(stage>0?zoneHeight(x,y,id,stage):6);
+    out.push(CIRC(cx,by-4,16,'rgba(255,120,40,0.28)'));
+    out.push(POLY([[cx,by-24],[cx+9*sw,by+2],[cx-9*sw,by+2]],'#ff5a1f'));
+    out.push(CIRC(cx,by-1,5,'rgba(255,200,80,0.9)'));
   }
 }
 
 // Vehículos: la carrocería se proyecta como paralelogramo (isométrico real), no rotada
-function drawCars(list){
+function carShapes(out,list){
   for(const c of list){
     const dx=c.nx-c.x,dy=c.ny-c.y,[ox,oy]=laneOffset(dx,dy);
     const fx=c.x+0.5+dx*c.p+ox, fy=c.y+0.5+dy*c.p+oy;
     const L=c.camion?0.31:0.22, W=c.camion?0.15:0.13;      // semi largo y semi ancho, en celdas
     const corner=(a,b)=>gridPoint(fx+dx*L*a-dy*W*b, fy+dy*L*a+dx*W*b);
-    const quad=(a0,a1,b0,b1,col)=>{
-      const p1=corner(a0,b0),p2=corner(a1,b0),p3=corner(a1,b1),p4=corner(a0,b1);
-      ctx.fillStyle=col;
-      ctx.beginPath();ctx.moveTo(p1[0],p1[1]);ctx.lineTo(p2[0],p2[1]);ctx.lineTo(p3[0],p3[1]);ctx.lineTo(p4[0],p4[1]);ctx.closePath();ctx.fill();
-    };
-    ctx.save();
-    ctx.translate(2,2);
-    quad(-1,1,-1,1,'rgba(0,0,0,0.28)');                    // sombra
-    ctx.restore();
-    quad(-1,1,-1,1,c.color);                               // carrocería
-    if(c.camion)quad(-0.95,-0.35,-0.95,0.95,'rgba(0,0,0,0.22)');  // caja
-    else quad(0.35,0.95,-0.85,0.85,'rgba(255,255,255,0.45)');     // parabrisas
+    const quad=(a0,a1,b0,b1)=>[corner(a0,b0),corner(a1,b0),corner(a1,b1),corner(a0,b1)];
+    const sombra=POLY(quad(-1,1,-1,1),'rgba(0,0,0,0.28)');
+    sombra.off=[2,2];                                      // render.js la corre 2px como el translate de antes
+    out.push(sombra);
+    out.push(POLY(quad(-1,1,-1,1),c.color));               // carrocería
+    if(c.camion)out.push(POLY(quad(-0.95,-0.35,-0.95,0.95),'rgba(0,0,0,0.22)'));   // caja
+    else out.push(POLY(quad(0.35,0.95,-0.85,0.85),'rgba(255,255,255,0.45)'));      // parabrisas
   }
 }
 
@@ -885,79 +886,45 @@ function visibleTiles(){
     const wx=(sx-camX)/zoom, wy=(sy-camY)/zoom;
     return [(wx/HW+wy/HH+1)/2,(wy/HH+1-wx/HW)/2];
   };
-  const c=[inv(0,0),inv(cv.width,0),inv(0,cv.height),inv(cv.width,cv.height)];
+  const c=[inv(0,0),inv(VW,0),inv(0,VH),inv(VW,VH)];
   let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
   for(const [x,y] of c){x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
   return {x0:Math.max(0,Math.floor(x0)-2),x1:Math.min(N-1,Math.ceil(x1)+2),
           y0:Math.max(0,Math.floor(y0)-2),y1:Math.min(N-1,Math.ceil(y1)+2)};
 }
 
-function draw(){
-  const z=zoom;
-  ctx.setTransform(1,0,0,1,0,0);
-  ctx.fillStyle='#16231a';                       // fuera del mapa
-  ctx.fillRect(0,0,cv.width,cv.height);
-  ctx.setTransform(z,0,0,z,camX,camY);
+// Vista previa de la herramienta sobre la celda que señala el mouse
+function hoverShapes(out,x,y){
+  const t=TILES[tool];
+  const ok=t.id===EMPTY?g[y][x]!==EMPTY:(canPlace(t.id,x,y)&&money>=t.cost);
+  const [cx,cy]=tileCenter(x,y);
+  out.push(POLY(rombo(cx,cy,HW,HH),ok?'rgba(134,255,134,0.22)':'rgba(255,134,134,0.22)'));
+  out.push(EDGE(rombo(cx,cy-1,HW-1,HH-1),ok?'#86ff86':'#ff8686',2));
+}
 
-  const bb=visibleTiles();
-  for(let y=bb.y0;y<=bb.y1;y++)for(let x=bb.x0;x<=bb.x1;x++)drawGround(x,y);
-
-  if(view!=='none'){                             // vistas de datos: sobre el suelo, debajo de las construcciones
-    for(let y=bb.y0;y<=bb.y1;y++)for(let x=bb.x0;x<=bb.x1;x++){
-      const c=overlayFor(x,y);
-      if(c){const [cx,cy]=tileCenter(x,y);fillDiamond(cx,cy,HW,HH,c);}
-    }
+// De noche se encienden las ventanas de los lotes desarrollados y las centrales
+function nightShapes(out,x,y){
+  const id=g[y][x],[cx,cy]=tileCenter(x,y);
+  if(isZone(id)&&res[y][x]>1){
+    const h=zoneHeight(x,y,id,res[y][x]/MAX_STAGE);
+    windowShapes(out,cx,cy,HW,HH,h,Math.max(1,Math.round(h/9)),true);
   }
+  if(id===POWER)out.push(CIRC(cx,cy-BASEH[POWER]-4,HW*0.16,'rgba(255,214,90,0.85)'));
+}
 
-  // Construcciones y vehículos en el mismo orden: el auto de una celda va antes que su edificio
-  const porCelda=new Map();
+// Faros: de noche los autos se delatan por la luz que llevan adelante
+function headlightShapes(out){
   for(const c of cars){
-    const k=c.y*N+c.x;
-    let a=porCelda.get(k);
-    if(!a)porCelda.set(k,a=[]);
-    a.push(c);
+    const dx=c.nx-c.x,dy=c.ny-c.y,[ox,oy]=laneOffset(dx,dy);
+    const [px,py]=gridPoint(c.x+0.5+dx*c.p+ox,c.y+0.5+dy*c.p+oy);
+    const [vx,vy]=worldDir(dx,dy);
+    out.push(CIRC(px+vx*0.15,py+vy*0.15,T*0.07,'rgba(255,240,170,0.9)'));
   }
-  for(let y=bb.y0;y<=bb.y1;y++)for(let x=bb.x0;x<=bb.x1;x++){
-    const fila=porCelda.get(y*N+x);
-    if(fila)drawCars(fila);
-    drawTile(x,y);
-  }
+}
 
-  if(hover&&inB(hover[0],hover[1])&&!painting){  // vista previa de la herramienta
-    const t=TILES[tool],[hx,hy]=hover;
-    const ok=t.id===EMPTY?g[hy][hx]!==EMPTY:(canPlace(t.id,hx,hy)&&money>=t.cost);
-    const [cx,cy]=tileCenter(hx,hy);
-    ctx.fillStyle=ok?'rgba(134,255,134,0.22)':'rgba(255,134,134,0.22)';
-    diamondPath(cx,cy,HW,HH);ctx.fill();
-    ctx.strokeStyle=ok?'#86ff86':'#ff8686';ctx.lineWidth=2;
-    diamondPath(cx,cy-1,HW-1,HH-1);ctx.stroke();
-  }
-
-  if(isNight()){
-    ctx.setTransform(1,0,0,1,0,0);
-    ctx.fillStyle='rgba(8,12,40,0.5)';
-    ctx.fillRect(0,0,cv.width,cv.height);
-    ctx.setTransform(z,0,0,z,camX,camY);
-    for(let y=bb.y0;y<=bb.y1;y++)for(let x=bb.x0;x<=bb.x1;x++){
-      const id=g[y][x],[cx,cy]=tileCenter(x,y);
-      if(isZone(id)&&res[y][x]>1){
-        const h=zoneHeight(x,y,id,res[y][x]/MAX_STAGE);
-        drawWindows(cx,cy,HW,HH,h,Math.max(1,Math.round(h/9)),true);
-      }
-      if(id===POWER){
-        ctx.fillStyle='rgba(255,214,90,0.85)';
-        ctx.beginPath();ctx.arc(cx,cy-BASEH[POWER]-4,HW*0.16,0,7);ctx.fill();
-      }
-    }
-    // faros: de noche los autos se delatan por la luz que llevan adelante
-    for(const c of cars){
-      const dx=c.nx-c.x,dy=c.ny-c.y,[ox,oy]=laneOffset(dx,dy);
-      const [px,py]=gridPoint(c.x+0.5+dx*c.p+ox,c.y+0.5+dy*c.p+oy);
-      const [vx,vy]=worldDir(dx,dy);
-      ctx.fillStyle='rgba(255,240,170,0.9)';
-      ctx.beginPath();ctx.arc(px+vx*0.15,py+vy*0.15,T*0.07,0,7);ctx.fill();
-    }
-  }
+// El dibujo lo hace render.js (PixiJS); sin él (por ejemplo en las pruebas) no se pinta nada
+function draw(){
+  if(window.CiudadRender&&CiudadRender.ready)CiudadRender.frame();
 }
 
 /* ============================== Interfaz ============================== */
@@ -1249,26 +1216,28 @@ cv.addEventListener('wheel',e=>{
 },{passive:false});
 
 function centrarCamara(){       // el rombo del mapa, en el medio de la pantalla
-  camX=cv.width/2;
-  camY=cv.height/2-zoom*(N-1)*HH;
+  camX=VW/2;
+  camY=VH/2-zoom*(N-1)*HH;
   fitCam();
 }
 function fitCam(){
-  const loX=cv.width-zoom*(WORLD.minX+WORLD.w), hiX=-zoom*WORLD.minX;
+  const loX=VW-zoom*(WORLD.minX+WORLD.w), hiX=-zoom*WORLD.minX;
   camX=loX>hiX?(loX+hiX)/2:clamp(camX,loX,hiX);
-  const loY=cv.height-zoom*(WORLD.minY+WORLD.h), hiY=-zoom*WORLD.minY;
+  const loY=VH-zoom*(WORLD.minY+WORLD.h), hiY=-zoom*WORLD.minY;
   camY=loY>hiY?(loY+hiY)/2:clamp(camY,loY,hiY);
 }
 
 /* ============================== Lienzo y encuadre ============================== */
 let camReady=false;
 // Cubrir: el rombo del mapa siempre tapa toda la ventana
-const fitZoom=()=>clamp(Math.max(cv.width/WORLD.w,cv.height/WORLD.h),ZMIN,ZMAX);
+const fitZoom=()=>clamp(Math.max(VW/WORLD.w,VH/WORLD.h),ZMIN,ZMAX);
 function resizeCanvas(reset){
   const w=Math.max(320,window.innerWidth||960), h=Math.max(240,window.innerHeight||600);
-  cv.width=w; cv.height=h; cv.style.width=w+'px'; cv.style.height=h+'px';
+  VW=w; VH=h;
+  if(window.CiudadRender&&CiudadRender.ready)CiudadRender.resize(w,h);   // el lienzo lo maneja PixiJS
+  else { cv.width=w; cv.height=h; cv.style.width=w+'px'; cv.style.height=h+'px'; }
   if(reset||!camReady){zoom=fitZoom();centrarCamara();camReady=true;}  // al abrir: cubre la ventana y apunta a la ciudad
-  fitCam(); dirty=true;
+  fitCam();
 }
 addEventListener('resize',()=>resizeCanvas(false));
 // De píxeles de pantalla a celda: se deshace la cámara y la proyección 2:1

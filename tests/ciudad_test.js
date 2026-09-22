@@ -32,15 +32,16 @@ const EXPORTS = `
   get TILES(){return TILES}, get zoom(){return zoom}, clamp,
   get VIEWS(){return VIEWS}, get cars(){return cars}, get carDensity(){return carDensity},
   get traffic(){return traffic}, get LANE(){return LANE}, get HW(){return HW}, get HH(){return HH}, get WORLD(){return WORLD},
-  stepTraffic, carTarget, laneOffset, roadAt, roadTiles, drawCars, drawTile, drawGround, drawRoadAxis, tileCenter, gridPoint, worldDir,
-  get ops(){return ctx.__ops}, clearOps(){ ctx.__ops.length = 0; },
+  stepTraffic, carTarget, laneOffset, roadAt, roadTiles, tileCenter, gridPoint, worldDir,
+  carShapes, tileShapes, groundShapes, roadAxisShapes, overlayShapes, fxShapes, hoverShapes, nightShapes, headlightShapes,
+  rombo, POLY, EDGE, LINE, DASH, RECT, CIRC, ELL, prismShapes, floorShapes, windowShapes, shade,
   setTool(i){ tool=i; }, setView(v){ view=v; }, setSpeed(s){ speed=s; },
   tick, draw, updateHoverInfo, updateHUD, updateSidebar, renderTools, renderViews, renderSpeed,
   canPlace, applyTool, undo, saveGame, loadGame,
   recalc, updateCoverages, snapshot,
   init, dayOf, isNight, tileName, hover(x,y){ hover=[x,y]; },
   hoverText(){ return document.getElementById('hoverinfo').textContent; },
-  get canvasSize(){ return [cv.width, cv.height]; },
+  get canvasSize(){ return [VW, VH]; },
   get cam(){ return [camX, camY]; },
   get ICON(){ return ICON; },
   viewport(w, h){ window.innerWidth = w; window.innerHeight = h; resizeCanvas(true); },
@@ -54,17 +55,9 @@ if (typeof globalThis.requestAnimationFrame === 'function') { /* nada */ }
 code += EXPORTS;
 
 // ---- DOM simulado ----
-// El canvas simulado registra las operaciones de dibujo: sirve para comprobar
-// dónde queda cada cosa (por ejemplo en qué carril se dibuja cada vehículo).
-const drawOps = [];
-const ctxProxy = new Proxy({}, {
-  get: (t, p) => {
-    if (p === '__ops') return drawOps;
-    if (p in t) return t[p];
-    return (...args) => { drawOps.push([String(p), args]); };
-  },
-  set: (t, p, v) => { t[p] = v; drawOps.push(['#' + String(p), [v]]); return true; }
-});
+// game.js ya casi no habla con el canvas: arma formas y render.js (PixiJS) las pinta.
+// Alcanza con un canvas simulado vacío que acepte getContext sin protestar.
+const ctxVacio = new Proxy({}, { get: () => () => {}, set: () => true });
 function mkEl(tag = 'div') {
   const el = {
     tagName: tag.toUpperCase(), style: {}, dataset: {}, children: [], value: '', textContent: '',
@@ -75,7 +68,7 @@ function mkEl(tag = 'div') {
     appendChild(c) { this.children.push(c); return c; },
     querySelectorAll() { return this.children.filter(c => c.tagName === 'BUTTON'); },
     addEventListener() {}, removeEventListener() {},
-    getContext() { return ctxProxy; },
+    getContext() { return ctxVacio; },
     getBoundingClientRect() { return { left: 0, top: 0, width: this.width, height: this.height }; }
   };
   // innerHTML='' tiene que vaciar los hijos, como en el DOM real
@@ -474,40 +467,47 @@ api.cars.length = 0;
 api.cars.push({ x: 5, y: 5, nx: 6, ny: 5, p: 0.5, spd: 2, color: '#fff', camion: false, life: 100 });  // hacia el este
 api.cars.push({ x: 7, y: 5, nx: 6, ny: 5, p: 0.5, spd: 2, color: '#000', camion: false, life: 100 });  // hacia el oeste, misma calle
 const este = coche(api.cars[0]), oeste = coche(api.cars[1]);
-api.clearOps();
-api.drawCars(api.cars);
-const pts = api.ops.filter(o => o[0] === 'moveTo' || o[0] === 'lineTo').map(o => o[1]);
-const tras = api.ops.filter(o => o[0] === 'translate').map(o => o[1]);
-const cuadro = i => pts.slice(i * 4, i * 4 + 4);                       // cada cuadro: 1 moveTo + 3 lineTo
-const mismo = (q, exp) => q.length === 4 && q.every((p, i) => igual(p, exp[i]));
+const formas = [];
+api.carShapes(formas, api.cars);
+const sombra = formas[0], cuerpo = formas[1], parabrisas = formas[2];
+const cuerpoO = formas[4], parabrisasO = formas[5];
+const mismo = (q, exp) => !!q && q.length === 4 && q.every((p, i) => igual(p, exp[i]));
+const grilla = q => q.map(p => [(p[0] / HW + p[1] / HH + 1) / 2, (p[1] / HH + 1 - p[0] / HW) / 2]);  // de píxeles a celdas
+const centGrilla = q => cent(grilla(q));
+const ejeCoche = c => { const dx = c.nx - c.x, dy = c.ny - c.y; return [c.x + 0.5 + dx * c.p, c.y + 0.5 + dy * c.p]; };
 ok('cada vehículo se dibuja en su lugar del mapa (proyección isométrica)',
-  pts.length === 24 && tras.length === 2 && tras.every(t => t[0] === 2 && t[1] === 2) &&
-  mismo(cuadro(0), este.carroceria) && mismo(cuadro(1), este.carroceria) &&   // sombra + carrocería
-  mismo(cuadro(2), este.parabrisas) &&
-  mismo(cuadro(3), oeste.carroceria) && mismo(cuadro(4), oeste.carroceria) &&
-  mismo(cuadro(5), oeste.parabrisas),
-  'carrocería este=' + JSON.stringify(cuadro(1).map(p => p.map(v => Math.round(v * 10) / 10))));
+  formas.length === 6 && formas.every(s => s.t === 'poly') &&
+  sombra.off[0] === 2 && sombra.off[1] === 2 && mismo(sombra.p, este.carroceria) &&   // sombra = misma caja, 2px al costado
+  mismo(cuerpo.p, este.carroceria) && mismo(parabrisas.p, este.parabrisas) &&
+  mismo(cuerpoO.p, oeste.carroceria) && mismo(parabrisasO.p, oeste.parabrisas),
+  'formas=' + formas.map(s => s.t).join(',') + ' carrocería este=' + JSON.stringify(cuerpo.p.map(p => p.map(v => Math.round(v * 10) / 10))));
 ok('cada sentido se dibuja en su carril (no sobre el eje)',
-  igual(resta(este.centro, este.eje), [-api.LANE * HW, api.LANE * HH]) &&
-  igual(resta(oeste.centro, oeste.eje), [api.LANE * HW, -api.LANE * HH]),
-  'este=' + resta(este.centro, este.eje).map(v => v.toFixed(1)).join(',') + ' oeste=' + resta(oeste.centro, oeste.eje).map(v => v.toFixed(1)).join(',') + ' carril=' + api.LANE + ' celdas');
+  (() => {
+    const lE = api.laneOffset(1, 0), lO = api.laneOffset(-1, 0);
+    const dE = resta(centGrilla(cuerpo.p), ejeCoche(api.cars[0]));
+    const dO = resta(centGrilla(cuerpoO.p), ejeCoche(api.cars[1]));
+    const cerca = (a, b) => Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
+    return cerca(dE, lE) && cerca(dO, lO) &&                 // cada auto cae en su carril
+           lE[0] * lO[0] + lE[1] * lO[1] < 0;                // y los dos carriles van para lados opuestos
+  })(),
+  'este=' + resta(centGrilla(cuerpo.p), ejeCoche(api.cars[0])).map(v => v.toFixed(3)).join(',') + ' oeste=' + resta(centGrilla(cuerpoO.p), ejeCoche(api.cars[1])).map(v => v.toFixed(3)).join(',') + ' carril=' + api.LANE + ' celdas');
 ok('los vehículos se dibujan orientados como la calle por la que van',
   (() => {
     const cruz = (a, b) => a[0] * b[1] - a[1] * b[0];
-    const largo = resta(este.carroceria[1], este.carroceria[0]);   // de la cola a la trompa
+    const largo = resta(cuerpo.p[1], cuerpo.p[0]);                 // de la cola a la trompa
     return Math.abs(cruz(largo, api.worldDir(1, 0))) < 1e-6 && largo[0] > 0 && largo[1] > 0;
   })(),
-  'largo=' + resta(este.carroceria[1], este.carroceria[0]).map(v => v.toFixed(1)).join(',') + ' calle=' + api.worldDir(1, 0).join(','));
+  'largo=' + resta(cuerpo.p[1], cuerpo.p[0]).map(v => v.toFixed(1)).join(',') + ' calle=' + api.worldDir(1, 0).join(','));
 ok('el parabrisas va adelante: el auto mira para donde va',
   (() => {
-    const punta = (q, dir) => { const d = resta(cent(q.parabrisas), cent(q.carroceria)); return d[0] * dir[0] + d[1] * dir[1] > 0; };
-    return punta(este, api.worldDir(1, 0)) && punta(oeste, api.worldDir(-1, 0));
+    const punta = (c, p, dir) => { const d = resta(cent(grilla(p)), cent(grilla(c))); return d[0] * dir[0] + d[1] * dir[1] > 0; };
+    return punta(cuerpo.p, parabrisas.p, api.worldDir(1, 0)) && punta(cuerpoO.p, parabrisasO.p, api.worldDir(-1, 0));
   })(),
   'este→' + api.worldDir(1, 0).join(',') + ' oeste→' + api.worldDir(-1, 0).join(','));
 ok('las ruedas no se salen del ancho de la calle',
   api.LANE + 0.13 <= 0.5 &&                                   // medio auto + carril ≤ medio tile
-  [...este.carroceria, ...este.parabrisas, ...oeste.carroceria, ...oeste.parabrisas].every(p => {
-    const fx = (p[0] / HW + p[1] / HH + 1) / 2, fy = (p[1] / HH + 1 - p[0] / HW) / 2;
+  [...cuerpo.p, ...parabrisas.p, ...cuerpoO.p, ...parabrisasO.p].every(p => {
+    const [fx, fy] = grilla([p])[0];
     const celda = api.g[Math.floor(fy)];                       // todas las esquinas caen sobre la calle
     return celda && celda[Math.floor(fx)] === 1;
   }),
@@ -520,20 +520,19 @@ for (let y = 0; y < NN; y++) for (let x = 0; x < NN; x++) api.g[y][x] = 0;
 api.g[9][8] = 1; api.g[9][9] = 1;                             // par suelto: extremo este en (8,9)
 api.g[7][12] = 1; api.g[8][12] = 1; api.g[9][12] = 1;         // columna en x=12, y=7..9
 api.g[15][15] = 1;                                            // calle aislada
-const ejeDe = (x, y) => {
-  api.clearOps(); api.drawRoadAxis(x, y);
-  return { mov: api.ops.filter(o => o[0] === 'moveTo').map(o => o[1]),
-           lin: api.ops.filter(o => o[0] === 'lineTo').map(o => o[1]) };
-};
+const ejeDe = (x, y) => { const out = []; api.roadAxisShapes(out, x, y); return out; };
 const centro = ejeDe(6, 5), extremo = ejeDe(4, 5), parSuelto = ejeDe(8, 9), columna = ejeDe(12, 8), aislada = ejeDe(15, 15);
+// tramo del eje: una sola raya discontinua, del borde al borde por donde la calle sigue
+const raya = (s, a, b) => s.length === 1 && s[0].t === 'dash' && s[0].on === 5 && s[0].gap === 6 &&
+  s[0].s === '#c9c9c9' && s[0].w === 1.3 && igual(s[0].a, a) && igual(s[0].b, b);
 ok('la línea de eje se dibuja sólo donde la calle sigue (isométrico)',
-  centro.mov.length === 1 && centro.lin.length === 1 &&
-  igual(centro.mov[0], [15, 157.5]) && igual(centro.lin[0], [45, 172.5]) &&          // (6,5): rombo en 30,165
-  igual(extremo.mov[0], [-30, 135]) && igual(extremo.lin[0], [-15, 142.5]) &&        // (4,5): sólo sigue al este
-  igual(parSuelto.mov[0], [-30, 255]) && igual(parSuelto.lin[0], [-15, 262.5]) &&    // (8,9): sólo sigue al este
-  igual(columna.mov[0], [135, 292.5]) && igual(columna.lin[0], [105, 307.5]) &&      // (12,8): norte ↔ sur
-  igual(aislada.mov[0], [-7.5, 450]) && igual(aislada.lin[0], [7.5, 450]),           // (15,15): guioncito
-  'centro=' + JSON.stringify(centro.mov) + '→' + JSON.stringify(centro.lin) + ' extremo=' + JSON.stringify(extremo.mov) + '→' + JSON.stringify(extremo.lin) + ' columna=' + JSON.stringify(columna.mov) + '→' + JSON.stringify(columna.lin));
+  raya(centro, [15, 157.5], [45, 172.5]) &&                    // (6,5): de punta a punta
+  raya(extremo, [-30, 135], [-15, 142.5]) &&                   // (4,5): sólo sigue al este
+  raya(parSuelto, [-30, 255], [-15, 262.5]) &&                 // (8,9): sólo sigue al este
+  raya(columna, [135, 292.5], [105, 307.5]) &&                 // (12,8): norte ↔ sur
+  aislada.length === 1 && aislada[0].t === 'line' && aislada[0].p.length === 2 &&
+  igual(aislada[0].p[0], [-7.5, 450]) && igual(aislada[0].p[1], [7.5, 450]),   // (15,15): guioncito
+  'centro=' + JSON.stringify(centro.map(s => [s.t, s.a, s.b])) + ' extremo=' + JSON.stringify(extremo.map(s => [s.t, s.a, s.b])) + ' columna=' + JSON.stringify(columna.map(s => [s.t, s.a, s.b])) + ' aislada=' + JSON.stringify(aislada.map(s => s.p)));
 /* ================= Interfaz: lienzo a pantalla completa, íconos y orden ================= */
 console.log('\n-- interfaz --');
 const VW = 1600, VH = 900, WD = api.WORLD;   // el mundo isométrico: 2*NN*HW por 2*NN*HH píxeles
@@ -606,9 +605,86 @@ ok('el html quedó sólo con el marcado y las referencias',
    && /<script src="game\.js"><\/script>/.test(markup)
    && !/<style>/.test(markup) && !/<script>/.test(markup),
    'link a style.css + script src="game.js", sin bloques embebidos');
-ok('style.css y game.js existen y no están vacíos',
-   fs.statSync(path.join(REPO, 'style.css')).size > 500 && fs.statSync(jsPath).size > 20000,
-   'css=' + fs.statSync(path.join(REPO, 'style.css')).size + ' b · js=' + fs.statSync(jsPath).size + ' b');
+ok('style.css, game.js y render.js existen y no están vacíos',
+   fs.statSync(path.join(REPO, 'style.css')).size > 500 && fs.statSync(jsPath).size > 20000 &&
+   fs.statSync(path.join(REPO, 'render.js')).size > 2000,
+   'css=' + fs.statSync(path.join(REPO, 'style.css')).size + ' b · js=' + fs.statSync(jsPath).size + ' b · render=' + fs.statSync(path.join(REPO, 'render.js')).size + ' b');
+
+/* ================= Dibujo: PixiJS ================= */
+console.log('\n-- pixijs --');
+const renderPath = path.join(REPO, 'render.js');
+const pixiPath = path.join(REPO, 'vendor', 'pixi.min.js');
+const renderSrc = fs.readFileSync(renderPath, 'utf8');
+const pixiSrc = fs.readFileSync(pixiPath, 'utf8');
+const kB = b => Math.round(b / 1024) + ' kB';
+ok('la librería PixiJS viene con el proyecto (no se pide a un CDN)',
+   fs.statSync(pixiPath).size > 100000 && /PIXI/.test(pixiSrc),
+   'vendor/pixi.min.js = ' + kB(fs.statSync(pixiPath).size));
+ok('el html carga PixiJS, el juego y el render, en ese orden',
+   (() => {
+     const i = s => markup.indexOf(s);
+     return i('<script src="vendor/pixi.min.js">') >= 0 && i('vendor/pixi.min.js') < i('src="game.js"') &&
+            i('src="game.js"') < i('src="render.js"') && !/https?:\/\//.test(markup);
+   })(),
+   'vendor/pixi.min.js → game.js → render.js, sin CDN');
+ok('game.js ya no dibuja: arma formas y se las pasa al render',
+   !/\bctx\./.test(code) && !/getContext/.test(code) && /CiudadRender\.frame\(\)/.test(code),
+   'sin ctx ni getContext en los ' + code.length + ' b de game.js');
+ok('el dibujo lo hace render.js con PixiJS sobre el mismo canvas',
+   /new PIXI\.Application\(\)/.test(renderSrc) && /canvas:\s*cv/.test(renderSrc) &&
+   /app\.renderer\.render\(app\.stage\)/.test(renderSrc) && !/getContext\(/.test(renderSrc),
+   'Application + renderer.render, sin contexto 2D');
+// handoff game.js → render.js: draw() tiene que delegar, y no romper si todavía no arrancó
+let cuadros = 0;
+sandbox.CiudadRender = { ready: true, frame() { cuadros++; }, resize() {} };
+api.draw();
+const pidioCuadro = cuadros;
+sandbox.CiudadRender = { ready: false, frame() { cuadros++; }, resize() {} };
+api.draw();
+ok('draw() le pide el cuadro al render de PixiJS (y no si todavía no arrancó)',
+   pidioCuadro === 1 && cuadros === 1, 'frame() llamado ' + cuadros + ' vez con ready=true');
+delete sandbox.CiudadRender;
+api.draw();                                   // sin render (como en este arnés) el juego sigue andando
+ok('sin render el juego no se cae', true, 'draw() sin CiudadRender: ok');
+
+// Contrato de formas: todo lo que arma game.js tiene que saberlo pintar render.js
+const tiposPintados = new Set([...renderSrc.matchAll(/case '(\w+)':/g)].map(m => m[1]));
+const campos = { poly: ['p', 'f'], edge: ['p', 's', 'w'], line: ['p', 's', 'w'],
+                 dash: ['a', 'b', 's', 'w', 'on', 'gap'], rect: ['x', 'y', 'w', 'h', 'f'],
+                 circle: ['x', 'y', 'r', 'f'], ellipse: ['x', 'y', 'rx', 'ry', 'f'] };
+api.init();
+api.setView(api.VIEWS.filter(v => v.id !== 'none')[0].id);   // para que las vistas de datos pinten
+const ids = api.TILES.map(t => t.id);
+for (let y = 0; y < NN; y++) for (let x = 0; x < NN; x++) {
+  api.g[y][x] = ids[(x + y * NN) % ids.length];             // un muestrario de todo lo que se puede construir
+  api.res[y][x] = 3;
+  api.burn[y][x] = (x + y) % 7 === 0 ? 3 : 0;
+}
+api.cars.length = 0;
+api.cars.push({ x: 5, y: 5, nx: 6, ny: 5, p: 0.5, spd: 2, color: '#fff', camion: true, life: 100 });
+const todas = [];
+const junta = (fn, a, b) => { const out = []; fn(out, a, b); todas.push(...out); };
+for (let y = 0; y < 6; y++) for (let x = 0; x < 6; x++) {
+  junta(api.groundShapes, x, y); junta(api.tileShapes, x, y); junta(api.overlayShapes, x, y);
+  junta(api.fxShapes, x, y); junta(api.nightShapes, x, y); junta(api.hoverShapes, x, y);
+}
+junta(api.carShapes, api.cars);
+junta(api.headlightShapes);
+const tipos = [...new Set(todas.map(s => s.t))].sort();
+const desconocidos = tipos.filter(t => !tiposPintados.has(t));
+ok('todo tipo de forma que arma game.js lo sabe pintar render.js',
+   desconocidos.length === 0 && tipos.length >= 6,
+   'tipos=' + tipos.join(',') + (desconocidos.length ? ' · sin pintar=' + desconocidos.join(',') : ''));
+const coords = s => (s.p ? s.p.flat() : [s.x, s.y, s.w, s.h, s.r, s.rx, s.ry, s.a, s.b, s.on, s.gap].filter(v => v !== undefined).flat());
+const incompletas = todas.filter(s => !(campos[s.t] || []).every(k => s[k] !== undefined));
+const conNaN = todas.filter(s => !coords(s).every(Number.isFinite));
+ok('las formas llegan completas y con coordenadas válidas (ni NaN ni undefined)',
+   incompletas.length === 0 && conNaN.length === 0,
+   todas.length + ' formas · incompletas=' + incompletas.length + ' · con NaN=' + conNaN.length);
+const sombraForma = todas.find(s => Array.isArray(s.off));
+ok('la sombra de los vehículos y el contorno del lote son formas por separado',
+   !!sombraForma && sombraForma.off.length === 2 && todas.some(s => s.t === 'edge'),
+   'sombra con off=[' + (sombraForma ? sombraForma.off.join(',') : '') + '] y formas de contorno presentes');
 
 api.setSpeed(0); api.updateHUD();
 const reloj = api.text('hd');
